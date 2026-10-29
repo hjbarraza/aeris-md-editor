@@ -39,9 +39,15 @@ public enum LibraryListing {
 
     /// Filtered, sorted children of `directory`; empty if it can't be read.
     public static func entries(in directory: URL) -> [LibraryEntry] {
+        read(directory) ?? []
+    }
+
+    /// Like `entries(in:)`, but nil when the folder can't be read, so a read error is not
+    /// mistaken for an empty folder.
+    public static func read(_ directory: URL) -> [LibraryEntry]? {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey]
         guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: keys, options: []) else { return [] }
+            at: directory, includingPropertiesForKeys: keys, options: []) else { return nil }
         let all: [LibraryEntry] = urls.compactMap { url in
             let values = try? url.resourceValues(forKeys: Set(keys))
             let name = url.lastPathComponent

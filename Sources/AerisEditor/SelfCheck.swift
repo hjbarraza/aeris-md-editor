@@ -32,6 +32,8 @@ enum SelfCheck {
         persistenceChecks()
         openChecks()
         sidebarChecks()
+        liveRefreshChecks()
+        liveRefreshEdgeChecks()
         try? FileManager.default.removeItem(at: scratch)
         if failed { print("selfcheck FAILED"); exit(1) }
         print("selfcheck passed")
@@ -533,6 +535,144 @@ enum SelfCheck {
 
         check(NSApp.windows.allSatisfy { !$0.isVisible }, "sidebar: no window was ordered in")
         Library.shared.removeLocation(at: Library.shared.tree.roots.count - 1)
+    }
+
+    /// Disk changes reach the sidebar within a second without collapsing folders or losing the highlight.
+    @MainActor static func liveRefreshChecks() {
+        guard !UserDefaults.standard.bool(forKey: "NSCloseAlwaysConfirmsChanges") else {
+            print("skip - live: NSCloseAlwaysConfirmsChanges is set, live refresh checks did not run")
+            return
+        }
+        let fm = FileManager.default
+        let dc = NSDocumentController.shared
+        let expandedKey = "\(EditorWindowController.layoutKey).ExpandedPaths"
+        UserDefaults.standard.removeObject(forKey: expandedKey)
+        defer { UserDefaults.standard.removeObject(forKey: expandedKey) }
+        let live = scratch.appending(path: "LiveLib")
+        let L = live.appending(path: "L"), Lrenamed = live.appending(path: "L-renamed")
+        try? fm.createDirectory(at: L.appending(path: "sub"), withIntermediateDirectories: true)
+        for name in ["sub/x.md", "y.md"] { fm.createFile(atPath: L.appending(path: name).path, contents: Data()) }
+        Library.shared.addLocation(L)
+        func rowNames(_ ov: NSOutlineView) -> [String] {
+            (0..<ov.numberOfRows).compactMap { (ov.item(atRow: $0) as? LibraryNode)?.name }
+        }
+        func tree(_ path: String) -> LibraryNode { Library.shared.tree.node(atPath: LibraryListing.canonicalPath(L.appending(path: path)))! }
+        let doc = try! dc.makeDocument(withContentsOf: L.appending(path: "y.md"), ofType: "net.daringfireball.markdown") as! MarkdownDocument
+        dc.addDocument(doc); doc.makeWindowControllers()
+        let wc = doc.windowControllers[0] as! EditorWindowController
+        let ov = wc.sidebar.outlineView
+        let subNode = tree("sub"), root = Library.shared.tree.roots.last!
+        ov.expandItem(subNode)
+        check(ov.isItemExpanded(root) && ov.isItemExpanded(subNode) && wc.sidebar.selectedURL?.lastPathComponent == "y.md",
+              "live: setup - location and sub expanded, y.md highlighted")
+
+        let before = ov.numberOfRows
+        fm.createFile(atPath: L.appending(path: "sub/new.md").path, contents: Data())
+        check(wait(timeout: 1) { ov.numberOfRows == before + 1 }, "live: created file appears within 1 s")
+        check(ov.isItemExpanded(subNode), "live: expanded folder stays expanded")
+        check(wc.sidebar.selectedURL?.lastPathComponent == "y.md", "live: active document stays highlighted")
+        try! fm.moveItem(at: L.appending(path: "sub/new.md"), to: L.appending(path: "sub/renamed.md"))
+        check(wait(timeout: 1) { rowNames(ov).contains("renamed.md") && !rowNames(ov).contains("new.md") }, "live: rename reflected")
+        try! fm.removeItem(at: L.appending(path: "sub/renamed.md"))
+        check(wait(timeout: 1) { ov.numberOfRows == before }, "live: delete reflected")
+
+        // A change under a folder that is expanded but hidden by a collapsed ancestor shows once the ancestor opens.
+        ov.collapseItem(root)
+        fm.createFile(atPath: L.appending(path: "sub/hidden.md").path, contents: Data())
+        _ = wait(timeout: 0.6) { false }
+        ov.expandItem(root)
+        wc.sidebar.reveal(doc.fileURL, expandingAncestors: false)  // collapsing the location dropped the highlight; a focus change restores it
+        check(rowNames(ov).contains("hidden.md") && ov.isItemExpanded(subNode), "live: change under a collapsed ancestor shows on expand")
+        try! fm.removeItem(at: L.appending(path: "sub/hidden.md"))
+        check(wait(timeout: 1) { !rowNames(ov).contains("hidden.md") }, "live: and is removed again")
+
+        // A renamed loaded folder is a new node: it must appear (collapsed, or expanded if saved as expanded) without a crash.
+        try! fm.moveItem(at: L.appending(path: "sub"), to: L.appending(path: "sub2"))
+        check(wait(timeout: 1) { rowNames(ov).contains("sub2") && !rowNames(ov).contains("sub") }, "live: renamed folder reflected")
+        check(wc.sidebar.selectedURL?.lastPathComponent == "y.md", "live: highlight survives a folder rename")
+
+        // The location itself renamed while running: bookmarks are re-resolved.
+        try! fm.moveItem(at: L, to: Lrenamed)
+        check(wait(timeout: 2) { rowNames(ov).contains(Lrenamed.lastPathComponent) }, "live: renamed location re-resolved")
+        check(Library.shared.tree.roots.last?.path == LibraryListing.canonicalPath(Lrenamed), "live: root tracks the new path")
+        fm.createFile(atPath: Lrenamed.appending(path: "after.md").path, contents: Data())
+        ov.expandItem(Library.shared.tree.roots.last!)
+        check(wait(timeout: 1) { rowNames(ov).contains("after.md") }, "live: renamed location is watched at its new path")
+
+        check(NSApp.windows.allSatisfy { !$0.isVisible }, "live: no window was ordered in")
+        doc.close()
+        Library.shared.removeLocation(at: Library.shared.tree.roots.count - 1)
+    }
+
+    /// Refresh edge cases: a user's folder selection survives a refresh, a root change does not
+    /// swallow other changes in its batch, and a location that is deleted or recreated is not stale.
+    @MainActor static func liveRefreshEdgeChecks() {
+        guard !UserDefaults.standard.bool(forKey: "NSCloseAlwaysConfirmsChanges") else {
+            print("skip - live edge: NSCloseAlwaysConfirmsChanges is set, live refresh edge checks did not run")
+            return
+        }
+        let fm = FileManager.default
+        let dc = NSDocumentController.shared
+        let expandedKey = "\(EditorWindowController.layoutKey).ExpandedPaths"
+        UserDefaults.standard.removeObject(forKey: expandedKey)
+        defer { UserDefaults.standard.removeObject(forKey: expandedKey) }
+        let edge = scratch.appending(path: "EdgeLib")
+        let A = edge.appending(path: "A"), A2 = edge.appending(path: "A-renamed"), B = edge.appending(path: "B")
+        let C = edge.appending(path: "C"), D = edge.appending(path: "D")
+        for dir in [A.appending(path: "sub"), B, C, D] { try? fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        for url in [A.appending(path: "a.md"), A.appending(path: "sub/s.md"), B.appending(path: "b.md"),
+                    C.appending(path: "c1.md"), D.appending(path: "d1.md")] { fm.createFile(atPath: url.path, contents: Data()) }
+        [A, B, C, D].forEach { Library.shared.addLocation($0) }
+        func rowNames(_ ov: NSOutlineView) -> [String] {
+            (0..<ov.numberOfRows).compactMap { (ov.item(atRow: $0) as? LibraryNode)?.name }
+        }
+        func node(_ url: URL) -> LibraryNode { Library.shared.tree.node(atPath: LibraryListing.canonicalPath(url))! }
+        let doc = try! dc.makeDocument(withContentsOf: A.appending(path: "a.md"), ofType: "net.daringfireball.markdown") as! MarkdownDocument
+        dc.addDocument(doc); doc.makeWindowControllers()
+        let wc = doc.windowControllers[0] as! EditorWindowController
+        let ov = wc.sidebar.outlineView
+        [B, C, D].forEach { ov.expandItem(node($0)) }
+        check(rowNames(ov).contains("c1.md") && rowNames(ov).contains("d1.md") && rowNames(ov).contains("b.md"),
+              "edge: setup - four locations expanded")
+
+        // A folder row the user selected stays selected through a refresh: no re-reveal of the document.
+        ov.selectRowIndexes(IndexSet(integer: ov.row(forItem: node(A.appending(path: "sub")))), byExtendingSelection: false)
+        let rows = ov.numberOfRows
+        fm.createFile(atPath: A.appending(path: "new.md").path, contents: Data())
+        check(wait(timeout: 1) { ov.numberOfRows == rows + 1 }, "edge: file created beside the selected folder appears")
+        check(wc.sidebar.selectedURL?.lastPathComponent == "sub", "edge: a refresh keeps the user's folder selection")
+
+        // A batch with a location rename and a change in another location: both are applied.
+        try! fm.moveItem(at: A, to: A2)
+        fm.createFile(atPath: B.appending(path: "b2.md").path, contents: Data())
+        check(wait(timeout: 2) { rowNames(ov).contains("A-renamed") && rowNames(ov).contains("b2.md") },
+              "edge: a location rename does not swallow a change in another location")
+
+        // The same batch handed over directly (no timing involved): the other change is applied too.
+        fm.createFile(atPath: B.appending(path: "b3.md").path, contents: Data())
+        Library.shared.folderChanged([
+            FolderChange(path: LibraryListing.canonicalPath(A2), mustScanSubDirs: false, rootChanged: true),
+            FolderChange(path: LibraryListing.canonicalPath(B), mustScanSubDirs: false, rootChanged: false),
+        ])
+        check(rowNames(ov).contains("b3.md"), "edge: a batch holding a root change still applies its other changes")
+
+        // A location recreated at the same path lists its new contents.
+        try! fm.removeItem(at: C)
+        try! fm.createDirectory(at: C, withIntermediateDirectories: true)
+        fm.createFile(atPath: C.appending(path: "c2.md").path, contents: Data())
+        check(wait(timeout: 2) { rowNames(ov).contains("c2.md") && !rowNames(ov).contains("c1.md") },
+              "edge: a recreated location shows its new contents")
+
+        // A location deleted while running shows no stale children.
+        try! fm.removeItem(at: D)
+        check(wait(timeout: 2) { !rowNames(ov).contains("d1.md") }, "edge: a deleted location shows no stale files")
+
+        check(NSApp.windows.allSatisfy { !$0.isVisible }, "edge: no window was ordered in")
+        doc.close()
+        let prefix = LibraryListing.canonicalPath(edge)
+        while let i = Library.shared.tree.roots.firstIndex(where: { $0.path.hasPrefix(prefix + "/") }) {
+            Library.shared.removeLocation(at: i)
+        }
     }
 }
 #endif

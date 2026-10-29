@@ -10,6 +10,8 @@ final class Library {
     let tree = LibraryTree()
     private let store: LocationStore
     private let sidebars = NSHashTable<SidebarViewController>.weakObjects()
+    /// Watches every root; rebuilt whenever the roots change.
+    private var watcher: FolderWatcher?
 
     init(store: LocationStore) {
         self.store = store
@@ -47,6 +49,24 @@ final class Library {
     func reload() {
         let urls = store.locations.indices.map { store.resolve(at: $0) ?? URL(fileURLWithPath: store.locations[$0].path) }
         tree.setRoots(urls)
+        // Events between the old stream and the new one are lost (and a root may have been
+        // recreated), so re-list every loaded folder; the sidebars reload from the tree below.
+        _ = tree.refresh(tree.roots.map { FolderChange(path: $0.path, mustScanSubDirs: true, rootChanged: false) })
+        watcher?.stop()
+        watcher = FolderWatcher(paths: tree.roots.map(\.path)) { [weak self] in self?.folderChanged($0) }
         for sidebar in sidebars.allObjects { sidebar.libraryRootsDidChange() }
+    }
+
+    /// Disk changes: a moved or deleted root re-resolves every bookmark and re-lists every loaded
+    /// folder (so no other change in the batch is lost); anything else re-lists only the loaded
+    /// folders involved and tells each sidebar what changed.
+    func folderChanged(_ changes: [FolderChange]) {
+        if changes.contains(where: \.rootChanged) {
+            reload()
+            return
+        }
+        let treeChanges = tree.refresh(changes)
+        guard !treeChanges.isEmpty else { return }
+        for sidebar in sidebars.allObjects { sidebar.apply(treeChanges) }
     }
 }

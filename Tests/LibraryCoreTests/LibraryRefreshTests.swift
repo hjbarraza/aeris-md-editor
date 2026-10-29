@@ -66,4 +66,24 @@ final class LibraryRefreshTests: XCTestCase {
         _ = tree.refresh([fc(rootPath + "/cold", scan: true)])
         XCTAssertNil(cold.children)
     }
+
+    func testUnreadableFolderKeepsItsChildren() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appending(path: "unreadable-\(UUID().uuidString)")
+        let locked = tmp.appending(path: "locked")
+        try fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? fm.removeItem(at: tmp)
+        }
+        fm.createFile(atPath: locked.appending(path: "l.md").path, contents: Data())
+        let tree = LibraryTree(); tree.setRoots([tmp])
+        tree.roots[0].loadChildren()
+        let node = try XCTUnwrap(tree.roots[0].children?.first)
+        node.loadChildren()
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        XCTAssertNil(LibraryListing.read(locked))
+        XCTAssertTrue(tree.refresh([fc(LibraryListing.canonicalPath(locked))]).isEmpty)
+        XCTAssertEqual(node.children?.map(\.name), ["l.md"])
+    }
 }
