@@ -1,0 +1,2 @@
+<li><input type="checkbox" disabled checked> done</li>
+<li><input type="checkbox" disabled> todo</li>

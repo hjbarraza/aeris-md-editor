@@ -1,0 +1,52 @@
+import AppKit
+import LibraryCore
+
+/// The app-wide library: the folders added to the sidebar and the lazy tree below them.
+/// Every window's sidebar shares it and is told when the roots change.
+@MainActor
+final class Library {
+    static let shared = Library(store: LocationStore(fileURL: LocationStore.defaultFileURL))
+
+    let tree = LibraryTree()
+    private let store: LocationStore
+    private let sidebars = NSHashTable<SidebarViewController>.weakObjects()
+
+    init(store: LocationStore) {
+        self.store = store
+        store.load()
+        reload()
+    }
+
+    func register(_ sidebar: SidebarViewController) {
+        sidebars.add(sidebar)
+    }
+
+    /// Appends `url` unless a location with the same canonical path already exists.
+    func addLocation(_ url: URL) {
+        do {
+            guard try store.add(url) else { return }
+        } catch {
+            NSLog("Aeris: could not save location %@: %@", url.path, "\(error)")
+            return
+        }
+        reload()
+    }
+
+    /// Removes the location at `index` (a root row) from the library; the folder on disk is untouched.
+    func removeLocation(at index: Int) {
+        do {
+            try store.remove(at: index)
+        } catch {
+            NSLog("Aeris: could not remove location %d: %@", index, "\(error)")
+            return
+        }
+        reload()
+    }
+
+    /// Re-resolves every bookmark (an unresolvable one keeps its stored path) and updates the roots.
+    func reload() {
+        let urls = store.locations.indices.map { store.resolve(at: $0) ?? URL(fileURLWithPath: store.locations[$0].path) }
+        tree.setRoots(urls)
+        for sidebar in sidebars.allObjects { sidebar.libraryRootsDidChange() }
+    }
+}

@@ -1,0 +1,16 @@
+.DS_Store
+*.hop
+.build/
+.swiftpm/
+build/
+.claude/worktrees/
+.superpowers/
+# Local-only development files (not part of the public repo)
+/CLAUDE.md
+/.claude/
+/docs/ORCHESTRATION.md
+/docs/log/
+/docs/superpowers/
+/docs/research/
+/scripts/decide.sh
+/scripts/gate.sh

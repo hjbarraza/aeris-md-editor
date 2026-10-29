@@ -1,0 +1,7 @@
+<h1 data-line="1">Title</h1>
+<p data-line="3">Para one\nstill para.</p>
+<blockquote data-line="6">\n<p data-line="6">quote</p>
+<li data-line="8">a</li>\n<li data-line="9">b</li>
+<pre data-line="11"><code>code
+<hr data-line="15">
+<table data-line="17">

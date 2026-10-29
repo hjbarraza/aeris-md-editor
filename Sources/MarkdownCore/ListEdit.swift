@@ -1,0 +1,210 @@
+import Foundation
+import Markdown
+
+/// Pure range maths for list commands: toggling, Return continuation, indent.
+public enum ListEdit {
+    public enum Kind: Sendable { case bullet, ordered, task, orderedTask }
+
+    /// A parsed list-item line. Offsets are UTF-16 within the line.
+    private struct Item {
+        let indent: String
+        let bulletChar: String?   // "-", "*", "+" for bullets
+        let number: Int?          // for ordered items
+        let delim: String         // "." or ")" for ordered items
+        let task: String?         // "[ ]" / "[x]"
+        let contentStart: Int
+        let content: String
+        let markerWidth: Int      // marker + one space: the item's content indent
+
+        func matches(_ k: Kind) -> Bool {
+            switch k {
+            case .bullet: return number == nil && task == nil
+            case .ordered: return number != nil && task == nil
+            case .task: return number == nil && task != nil
+            case .orderedTask: return number != nil && task != nil
+            }
+        }
+    }
+
+    private static func parse(_ s: String) -> Item? {
+        guard let c = BlockLines.captures(#"^([ \t]*)([-*+]|(\d{1,9})([.)]))([ \t]+|$)(?:(\[[ xX]\])([ \t]+|$))?(.*)$"#, s)
+        else { return nil }
+        let marker = BlockLines.sub(s, c[2]) ?? ""
+        return Item(indent: BlockLines.sub(s, c[1]) ?? "",
+                    bulletChar: c[3].location == NSNotFound ? marker : nil,
+                    number: BlockLines.sub(s, c[3]).flatMap { Int($0) },
+                    delim: BlockLines.sub(s, c[4]) ?? ".",
+                    task: BlockLines.sub(s, c[6]),
+                    contentStart: c[8].location,
+                    content: BlockLines.sub(s, c[8]) ?? "",
+                    markerWidth: marker.utf16.count + 1)
+    }
+
+    // MARK: Toggle
+
+    /// Converts touched lines to `kind`, or strips the markers if they all already are.
+    /// Ordered numbering starts at 1 and counts non-blank lines. Existing task
+    /// state and bullet characters are kept.
+    public static func toggleList(_ kind: Kind, text: String, selection: NSRange) -> TextEdit {
+        let lines = BlockLines.split(text)
+        let t = BlockLines.touched(lines, selection)
+        let multi = t.last > t.first
+        let body = lines[t.first...t.last].map(\.content).filter { !BlockLines.isBlank($0) }
+        let allSame = !body.isEmpty && body.allSatisfy { parse($0)?.matches(kind) == true }
+        var n = 0
+        return BlockLines.apply(lines, t, selection) { _, s in
+            if multi && BlockLines.isBlank(s) { return s }
+            let item = parse(s)
+            if allSame, let item { return item.indent + item.content }
+            let indent = item?.indent ?? String(s.prefix { $0 == " " || $0 == "\t" })
+            let content = item?.content ?? String(s.dropFirst(indent.count))
+            n += 1
+            let marker: String
+            switch kind {
+            case .bullet, .task: marker = item?.bulletChar ?? "-"
+            case .ordered, .orderedTask: marker = "\(n)\(item?.number != nil ? item!.delim : ".")"
+            }
+            let box = (kind == .task || kind == .orderedTask) ? (item?.task ?? "[ ]") + " " : ""
+            return indent + marker + " " + box + content
+        }
+    }
+
+    // MARK: Return
+
+    /// What Return does at a caret, or nil when it should behave normally.
+    /// Continues list items (bullet char kept, ordered +1, new tasks unchecked)
+    /// and blockquotes; Return on an empty item/quote line clears the line.
+    /// Following ordered items are NOT renumbered. A setext underline (`-` under
+    /// a paragraph line) is not an item. Only the caret's line and the one above
+    /// are read. Code blocks are the caller's to exclude.
+    public static func newline(text: String, selection: NSRange) -> TextEdit? {
+        guard selection.length == 0 else { return nil }
+        let lines = BlockLines.split(text, around: selection, linesBefore: Self.paragraphLookback)
+        let li = BlockLines.touched(lines, selection).first
+        let line = lines[li]
+        let col = selection.location - line.start
+        let eol = BlockLines.eol(text)
+        if isSetextUnderline(lines, li) { return nil }
+
+        func clear() -> TextEdit {
+            TextEdit(range: NSRange(location: line.start, length: line.length), replacement: "",
+                          selection: NSRange(location: line.start, length: 0))
+        }
+        func insert(_ prefix: String) -> TextEdit {
+            let rep = eol + prefix
+            return TextEdit(range: NSRange(location: selection.location, length: 0), replacement: rep,
+                                 selection: NSRange(location: selection.location + rep.utf16.count, length: 0))
+        }
+
+        if let item = parse(line.content) {
+            guard col >= item.contentStart else { return nil }
+            if BlockLines.isBlank(item.content) { return clear() }
+            var marker: String
+            if let n = item.number { marker = "\(n + 1)\(item.delim)" } else { marker = item.bulletChar ?? "-" }
+            marker += " "
+            if item.task != nil { marker += "[ ] " }
+            return insert(item.indent + marker)
+        }
+        if let c = BlockLines.captures(#"^([ \t]{0,3}(?:>[ \t]?)+)(.*)$"#, line.content) {
+            let prefixLen = c[1].length
+            guard col >= prefixLen else { return nil }
+            if BlockLines.isBlank(BlockLines.sub(line.content, c[2]) ?? "") { return clear() }
+            return insert(BlockLines.sub(line.content, c[1]) ?? "> ")
+        }
+        return nil
+    }
+
+    // MARK: Indent / outdent
+
+    /// List items indent by their content width (2 for `- `, 3 for `1. `);
+    /// other lines by 4 spaces. Blank lines in a multi-line selection are skipped.
+    public static func indent(text: String, selection: NSRange) -> TextEdit {
+        let lines = BlockLines.split(text, around: selection)
+        let t = BlockLines.touched(lines, selection)
+        let multi = t.last > t.first
+        return BlockLines.apply(lines, t, selection) { _, s in
+            if multi && BlockLines.isBlank(s) { return s }
+            let width = parse(s)?.markerWidth ?? 4
+            return String(repeating: " ", count: width) + s
+        }
+    }
+
+    /// Removes one leading tab, or leading spaces: a nested list item moves to
+    /// its parent item's indentation (the nearest earlier item indented less);
+    /// other lines lose up to one indent step (item content width, else 4).
+    /// The parent is looked for in the 1000 lines above.
+    public static func outdent(text: String, selection: NSRange) -> TextEdit {
+        let lines = BlockLines.split(text, around: selection, linesBefore: 1000)
+        let t = BlockLines.touched(lines, selection)
+        return BlockLines.apply(lines, t, selection) { i, s in
+            if s.hasPrefix("\t") { return String(s.dropFirst()) }
+            let spaces = s.prefix { $0 == " " }.count
+            let item = parse(s)
+            if item != nil, spaces > 0,
+               let parent = lines[..<(t.first + i)].reversed().lazy.compactMap({ parse($0.content) })
+                   .first(where: { $0.indent.count < spaces }) {
+                return parent.indent + String(s.dropFirst(spaces))
+            }
+            return String(s.dropFirst(min(spaces, item?.markerWidth ?? 4)))
+        }
+    }
+
+    /// True when the line holding the selection's start is a list item (not a
+    /// setext underline).
+    public static func isItem(text: String, selection: NSRange) -> Bool {
+        let lines = BlockLines.split(text, around: NSRange(location: selection.location, length: 0), linesBefore: Self.paragraphLookback)
+        let li = BlockLines.touched(lines, NSRange(location: selection.location, length: 0)).first
+        return parse(lines[li].content) != nil && !isSetextUnderline(lines, li)
+    }
+
+    /// Lines read above the caret to tell a setext underline from a list item.
+    static let paragraphLookback = 50
+
+    /// A lone `-` (or `=`) run under a top-level paragraph line underlines a
+    /// setext heading. The line above is such a line unless blank, a list item, a
+    /// quote, an ATX heading, a fence or a table row, or unless the paragraph it
+    /// belongs to (the non-blank lines above it) started in a list item or a
+    /// quote: then the underline would sit outside that container, so it is a
+    /// new list item, not an underline.
+    private static func isSetextUnderline(_ lines: [BlockLine], _ i: Int) -> Bool {
+        guard i > 0, lines[i].content.range(of: #"^ {0,3}(-+|=+)[ \t]*$"#, options: .regularExpression) != nil
+        else { return false }
+        let above = lines[i - 1].content
+        guard !BlockLines.isBlank(above), parse(above) == nil,
+              above.range(of: #"^ {0,3}([>#|]|```|~~~)"#, options: .regularExpression) == nil else { return false }
+        for line in lines[..<(i - 1)].reversed() {
+            if BlockLines.isBlank(line.content) { break }
+            if parse(line.content) != nil || line.content.range(of: #"^ {0,3}>"#, options: .regularExpression) != nil {
+                return false
+            }
+        }
+        return true
+    }
+
+    // MARK: Checkbox click
+
+    /// Flips the `[ ]` / `[x]` of the task item whose box holds `index` (a click's
+    /// insertion index, so either edge of the box counts); nil anywhere else. Task
+    /// items come from swift-markdown (`ListItem.checkbox`), so a `[ ]` in code or
+    /// in plain text is never a box. The caret stays at `index`.
+    public static func toggleCheckbox(text: String, at index: Int) -> TextEdit? {
+        let s = text as NSString
+        let conv = SpanCollector(text)
+        var hit: TextEdit?
+        func walk(_ m: Markup) {
+            if let item = m as? ListItem, let box = item.checkbox, let r = conv.nsRange(item.range) {
+                // The box is the first `[` after the item's marker, on its first line.
+                let line = s.lineRange(for: NSRange(location: r.location, length: 0))
+                let b = s.range(of: "[", range: NSRange(location: r.location, length: NSMaxRange(line) - r.location))
+                if b.location != NSNotFound, b.location <= index, index <= b.location + 3 {
+                    hit = TextEdit(range: NSRange(location: b.location + 1, length: 1),
+                                   replacement: box == .checked ? " " : "x",
+                                   selection: NSRange(location: index, length: 0))
+                }
+            }
+            m.children.forEach(walk)
+        }
+        walk(MarkdownCore.parse(text))
+        return hit
+    }
+}
