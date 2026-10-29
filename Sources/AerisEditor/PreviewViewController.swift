@@ -84,21 +84,21 @@ final class PreviewViewController: NSViewController, WKNavigationDelegate {
         rendering = true
         let gen = generation
         let text = document.textStorage.string
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let body = MarkdownCore.html(text, sourceLines: true)
-            await MainActor.run {
-                guard let self else { return }
-                self.rendering = false
-                if gen > self.shownGeneration {
-                    self.shownGeneration = gen
-                    self.show(body)
-                }
-                // Re-render only if the text moved on since this render's snapshot.
-                if self.renderRequested, gen != self.generation {
-                    self.render()
-                }
-                self.renderRequested = false
+        Task { [weak self] in
+            let body = await Task.detached(priority: .userInitiated) {
+                MarkdownCore.html(text, sourceLines: true)
+            }.value
+            guard let self else { return }
+            self.rendering = false
+            if gen > self.shownGeneration {
+                self.shownGeneration = gen
+                self.show(body)
             }
+            // Re-render only if the text moved on since this render's snapshot.
+            if self.renderRequested, gen != self.generation {
+                self.render()
+            }
+            self.renderRequested = false
         }
     }
 

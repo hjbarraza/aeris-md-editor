@@ -122,17 +122,17 @@ final class StatsController {
         let gen = generation
         // A native copy: the storage's own string may be a live view of mutable text.
         let text = String(decoding: Array(storage.string.utf8), as: UTF8.self)
-        Task.detached(priority: .utility) { [weak self] in
-            let result = TextStats.compute(text)
-            await MainActor.run {
-                guard let self else { return }
-                self.inFlight = false
-                if gen == self.generation { self.model.update(result) }
-                // The text changed while counting: count the newer text once more.
-                if self.pending {
-                    self.pending = false
-                    if gen != self.generation { self.run() }
-                }
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                TextStats.compute(text)
+            }.value
+            guard let self else { return }
+            self.inFlight = false
+            if gen == self.generation { self.model.update(result) }
+            // The text changed while counting: count the newer text once more.
+            if self.pending {
+                self.pending = false
+                if gen != self.generation { self.run() }
             }
         }
     }

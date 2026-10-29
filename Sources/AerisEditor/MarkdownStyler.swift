@@ -239,21 +239,21 @@ final class MarkdownStyler: NSObject, NSTextStorageDelegate {
         parsing = true
         let gen = generation
         let text = storage.string
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let (spans, starts) = MarkdownCore.styleSpansAndBlockStarts(text)
-            await MainActor.run {
-                guard let self else { return }
-                self.parsing = false
-                if gen == self.generation {
-                    self.applyFullPass(spans, blockStarts: starts)
-                    self.didApplyFullPass?()
-                }
-                // Re-parse only if the text moved on since this parse's snapshot.
-                if self.parseRequested, gen != self.generation {
-                    self.startFullParse()
-                }
-                self.parseRequested = false
+        Task { [weak self] in
+            let (spans, starts) = await Task.detached(priority: .userInitiated) {
+                MarkdownCore.styleSpansAndBlockStarts(text)
+            }.value
+            guard let self else { return }
+            self.parsing = false
+            if gen == self.generation {
+                self.applyFullPass(spans, blockStarts: starts)
+                self.didApplyFullPass?()
             }
+            // Re-parse only if the text moved on since this parse's snapshot.
+            if self.parseRequested, gen != self.generation {
+                self.startFullParse()
+            }
+            self.parseRequested = false
         }
     }
 
