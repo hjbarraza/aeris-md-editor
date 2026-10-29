@@ -76,7 +76,9 @@ public final class LibraryTree {
         for path in RefreshPlan.directories(for: changes, loaded: loadedDirectoryPaths) {
             // Looked up fresh each time: an earlier change may have detached this folder.
             guard let node = loadedNode(atPath: path), let old = node.children else { continue }
-            let new = LibraryListing.entries(in: node.url)
+            // A folder that can't be read keeps its children: a transient failure must not empty it,
+            // and a folder that is gone is removed by its parent's refresh.
+            guard let new = LibraryListing.read(node.url) else { continue }
             let diff = ChildDiff.diff(old: old.map { LibraryEntry(name: $0.name, isDirectory: $0.isDirectory) }, new: new)
             guard !diff.removed.isEmpty || !diff.inserted.isEmpty else { continue }
             node.applyListing(new)

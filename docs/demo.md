@@ -42,3 +42,5 @@ let greeting = "# not a heading"
 File > Add Location… and pick `docs/demo-library`. Expect Drafts, Notes, Welcome.md; Notes shows Archive and Meeting.txt (no `data.json`, no hidden file).
 
 Click a file in the library: it replaces the document in this window; edits to the previous file are saved first; an unsaved new document asks before it goes.
+
+Create, rename or delete a file in the location in Finder; the sidebar updates within a second without collapsing folders.

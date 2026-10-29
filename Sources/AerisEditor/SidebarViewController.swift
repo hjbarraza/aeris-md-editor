@@ -75,6 +75,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         restoreExpansion()
     }
 
+    /// Applies what a disk refresh changed. Only folders on screen are edited in place; a
+    /// collapsed folder reloads when it is expanded. Unchanged folders keep their nodes, so
+    /// they stay expanded, and the window's document stays highlighted.
+    func apply(_ changes: [TreeChange]) {
+        outlineView.beginUpdates()
+        for change in changes where outlineView.isItemExpanded(change.parent) {
+            outlineView.removeItems(at: change.removed, inParent: change.parent, withAnimation: .effectFade)
+            outlineView.insertItems(at: change.inserted, inParent: change.parent, withAnimation: .effectFade)
+        }
+        outlineView.endUpdates()
+        // A renamed folder is a new node: expand it again if its new path is saved as expanded.
+        if changes.contains(where: { change in change.inserted.contains { change.parent.children?[$0].isDirectory == true } }) {
+            restoreExpansion()
+        }
+        reveal((view.window?.windowController?.document as? NSDocument)?.fileURL, expandingAncestors: false)
+    }
+
     /// Expands the folders saved as expanded (parents first) and drops saved paths that are
     /// gone, so a folder deleted since the last launch is forgotten.
     private func restoreExpansion() {
