@@ -44,13 +44,15 @@ public final class LibraryTree {
 
     public init() {}
 
-    /// Keeps existing root nodes whose canonical path is unchanged, in the given order.
+    /// Keeps existing root nodes whose canonical path is unchanged and still exists, in the given
+    /// order. A root whose folder is gone gets a fresh node, so it keeps no stale children.
     public func setRoots(_ urls: [URL]) {
         let existing = Dictionary(roots.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
         roots = urls.map { url in
             let path = LibraryListing.canonicalPath(url)
-            return existing[path] ?? LibraryNode(url: url, path: path, name: url.lastPathComponent,
-                                                 isDirectory: true, parent: nil)
+            if let kept = existing[path], FileManager.default.fileExists(atPath: path) { return kept }
+            return LibraryNode(url: url, path: path, name: url.lastPathComponent,
+                                       isDirectory: true, parent: nil)
         }
     }
 

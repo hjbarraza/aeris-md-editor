@@ -77,8 +77,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Applies what a disk refresh changed. Only folders on screen are edited in place; a
     /// collapsed folder reloads when it is expanded. Unchanged folders keep their nodes, so
-    /// they stay expanded, and the window's document stays highlighted.
+    /// they stay expanded. The selection is the user's: it is put back if the edit dropped it,
+    /// never moved, and the view never scrolls.
     func apply(_ changes: [TreeChange]) {
+        let selected = outlineView.item(atRow: outlineView.selectedRow) as? LibraryNode
+        revealing = true  // selection changes while rows are edited are never a request to open
+        defer { revealing = false }
         outlineView.beginUpdates()
         for change in changes where outlineView.isItemExpanded(change.parent) {
             outlineView.removeItems(at: change.removed, inParent: change.parent, withAnimation: .effectFade)
@@ -89,7 +93,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if changes.contains(where: { change in change.inserted.contains { change.parent.children?[$0].isDirectory == true } }) {
             restoreExpansion()
         }
-        reveal((view.window?.windowController?.document as? NSDocument)?.fileURL, expandingAncestors: false)
+        if let selected, outlineView.item(atRow: outlineView.selectedRow) as? LibraryNode !== selected {
+            let row = outlineView.row(forItem: selected)
+            if row >= 0 { outlineView.selectRowIndexes([row], byExtendingSelection: false) }
+        }
     }
 
     /// Expands the folders saved as expanded (parents first) and drops saved paths that are

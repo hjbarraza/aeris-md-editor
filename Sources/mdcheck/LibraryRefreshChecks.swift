@@ -76,4 +76,23 @@ import LibraryCore
     fm.createFile(atPath: tmp.appending(path: "locked/m.md").path, contents: Data())
     check(tree.refresh([fc(rootPath + "/locked")]).count == 1 && locked.children?.map(\.name) == ["l.md", "m.md"],
           "refresh: readable again, picked up")
+
+    // a location deleted while running: the same stored path comes back as a root with no stale children
+    let gone = fm.temporaryDirectory.appending(path: "mdcheck-gone-\(UUID().uuidString)")
+    try? fm.createDirectory(at: gone, withIntermediateDirectories: true)
+    fm.createFile(atPath: gone.appending(path: "a.md").path, contents: Data())
+    let goneStored = URL(fileURLWithPath: LibraryListing.canonicalPath(gone))  // the store keeps canonical paths
+    let goneTree = LibraryTree(); goneTree.setRoots([goneStored])
+    goneTree.roots[0].loadChildren()
+    try? fm.removeItem(at: gone)
+    goneTree.setRoots([goneStored])
+    goneTree.roots[0].loadChildren()
+    check(goneTree.roots[0].children?.isEmpty == true, "roots: a deleted location keeps no stale children")
+    try? fm.createDirectory(at: gone, withIntermediateDirectories: true)
+    fm.createFile(atPath: gone.appending(path: "b.md").path, contents: Data())
+    defer { try? fm.removeItem(at: gone) }
+    goneTree.setRoots([goneStored])
+    _ = goneTree.refresh([fc(LibraryListing.canonicalPath(gone))])  // the app re-lists loaded folders after every reload
+    goneTree.roots[0].loadChildren()
+    check(goneTree.roots[0].children?.map(\.name) == ["b.md"], "roots: a recreated location lists its new contents")
 }
